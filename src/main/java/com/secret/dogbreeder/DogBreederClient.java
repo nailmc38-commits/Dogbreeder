@@ -22,14 +22,18 @@ import java.util.Map;
 
 public final class DogBreederClient implements ClientModInitializer {
     private static final double RANGE = 4.25;
-    private static final int ACTION_DELAY_TICKS = 7;
-    private static final int SAME_WOLF_COOLDOWN_TICKS = 18;
+
+    // Ultra-fast mode: one valid wolf interaction can happen every client tick.
+    private static final int ACTION_DELAY_TICKS = 0;
+    private static final int SAME_WOLF_COOLDOWN_TICKS = 1;
+    private static final int STATUS_EVERY_ACTIONS = 5;
 
     private static final Map<Integer, Integer> wolfCooldowns = new HashMap<>();
 
     private static boolean enabled;
     private static int actionDelay;
     private static int statusDelay;
+    private static int actionsSinceStatus;
     private static int previousHotbarSlot = -1;
 
     @Override
@@ -71,6 +75,7 @@ public final class DogBreederClient implements ClientModInitializer {
         enabled = value;
         actionDelay = 0;
         statusDelay = 0;
+        actionsSinceStatus = 0;
         wolfCooldowns.clear();
 
         if (!enabled && client.player != null && previousHotbarSlot >= 0 && previousHotbarSlot <= 8) {
@@ -81,7 +86,7 @@ public final class DogBreederClient implements ClientModInitializer {
 
     private static Text statusText() {
         return Text.literal("DogBreeder: ")
-                .append(Text.literal(enabled ? "ON" : "OFF")
+                .append(Text.literal(enabled ? "ON • ULTRA FAST" : "OFF")
                         .formatted(enabled ? Formatting.GREEN : Formatting.RED));
     }
 
@@ -125,20 +130,26 @@ public final class DogBreederClient implements ClientModInitializer {
             if (statusDelay <= 0) {
                 player.sendMessage(Text.literal("DogBreeder: nearby wolves are already bred/grown or cooling down.")
                         .formatted(Formatting.GRAY), true);
-                statusDelay = 40;
+                statusDelay = 20;
             }
             return;
         }
+
+        boolean baby = target.isBaby();
 
         client.interactionManager.interactEntity(player, target, Hand.MAIN_HAND);
         player.swingHand(Hand.MAIN_HAND);
 
         wolfCooldowns.put(target.getId(), SAME_WOLF_COOLDOWN_TICKS);
         actionDelay = ACTION_DELAY_TICKS;
+        actionsSinceStatus++;
 
-        String action = target.isBaby() ? "Growing baby wolf" : "Feeding adult wolf";
-        player.sendMessage(Text.literal("DogBreeder: " + action + " • steak " + totalSteakCount(player))
-                .formatted(Formatting.GREEN), true);
+        if (actionsSinceStatus >= STATUS_EVERY_ACTIONS) {
+            String action = baby ? "Rapid-growing babies" : "Rapid-breeding adults";
+            player.sendMessage(Text.literal("DogBreeder: " + action + " • steak " + totalSteakCount(player))
+                    .formatted(Formatting.GREEN), true);
+            actionsSinceStatus = 0;
+        }
     }
 
     private static List<WolfEntity> ownedNearbyWolves(MinecraftClient client) {
@@ -178,10 +189,12 @@ public final class DogBreederClient implements ClientModInitializer {
                 .comparingInt(WolfEntity::getBreedingAge)
                 .thenComparingDouble(wolf -> player.squaredDistanceTo(wolf)));
 
+        // Get two adults into love mode as quickly as possible.
         if (readyAdults.size() >= 2 || (!lovingAdults.isEmpty() && !readyAdults.isEmpty())) {
             return readyAdults.get(0);
         }
 
+        // Once the adults are handled, spam-feed babies so they grow as fast as the server accepts food.
         if (!babies.isEmpty()) {
             return babies.get(0);
         }
