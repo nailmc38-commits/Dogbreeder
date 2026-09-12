@@ -16,25 +16,18 @@ import net.minecraft.util.Hand;
 
 import java.util.ArrayList;
 import java.util.Comparator;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 
 public final class DogBreederClient implements ClientModInitializer {
     private static final double RANGE = 4.25;
-
-    // Ultra-fast mode: one valid wolf interaction can happen every client tick.
-    private static final int ACTION_DELAY_TICKS = 0;
-    private static final int SAME_WOLF_COOLDOWN_TICKS = 1;
-    private static final int STATUS_EVERY_ACTIONS = 5;
-
-    private static final Map<Integer, Integer> wolfCooldowns = new HashMap<>();
+    private static final int STATUS_EVERY_ACTIONS = 8;
 
     private static boolean enabled;
-    private static int actionDelay;
     private static int statusDelay;
     private static int actionsSinceStatus;
     private static int previousHotbarSlot = -1;
+    private static int babyCursor;
+    private static int adultCursor;
 
     @Override
     public void onInitializeClient() {
@@ -73,10 +66,10 @@ public final class DogBreederClient implements ClientModInitializer {
         }
 
         enabled = value;
-        actionDelay = 0;
         statusDelay = 0;
         actionsSinceStatus = 0;
-        wolfCooldowns.clear();
+        babyCursor = 0;
+        adultCursor = 0;
 
         if (!enabled && client.player != null && previousHotbarSlot >= 0 && previousHotbarSlot <= 8) {
             client.player.getInventory().setSelectedSlot(previousHotbarSlot);
@@ -86,25 +79,17 @@ public final class DogBreederClient implements ClientModInitializer {
 
     private static Text statusText() {
         return Text.literal("DogBreeder: ")
-                .append(Text.literal(enabled ? "ON • ULTRA FAST" : "OFF")
+                .append(Text.literal(enabled ? "ON • MAX SPAM" : "OFF")
                         .formatted(enabled ? Formatting.GREEN : Formatting.RED));
     }
 
     private static void tick(MinecraftClient client) {
-        tickWolfCooldowns();
-
         if (!enabled || client.player == null || client.world == null || client.interactionManager == null) {
             return;
         }
 
         ClientPlayerEntity player = client.player;
-
         if (statusDelay > 0) statusDelay--;
-        if (actionDelay > 0) {
-            actionDelay--;
-            ensureSteakInHand(client);
-            return;
-        }
 
         if (!ensureSteakInHand(client)) {
             if (statusDelay <= 0) {
@@ -126,26 +111,15 @@ public final class DogBreederClient implements ClientModInitializer {
         }
 
         WolfEntity target = chooseTarget(player, wolves);
-        if (target == null) {
-            if (statusDelay <= 0) {
-                player.sendMessage(Text.literal("DogBreeder: nearby wolves are already bred/grown or cooling down.")
-                        .formatted(Formatting.GRAY), true);
-                statusDelay = 20;
-            }
-            return;
-        }
+        if (target == null) return;
 
         boolean baby = target.isBaby();
-
         client.interactionManager.interactEntity(player, target, Hand.MAIN_HAND);
         player.swingHand(Hand.MAIN_HAND);
-
-        wolfCooldowns.put(target.getId(), SAME_WOLF_COOLDOWN_TICKS);
-        actionDelay = ACTION_DELAY_TICKS;
         actionsSinceStatus++;
 
         if (actionsSinceStatus >= STATUS_EVERY_ACTIONS) {
-            String action = baby ? "Rapid-growing babies" : "Rapid-breeding adults";
+            String action = baby ? "Spam-growing babies" : "Spam-feeding ALL adults";
             player.sendMessage(Text.literal("DogBreeder: " + action + " • steak " + totalSteakCount(player))
                     .formatted(Formatting.GREEN), true);
             actionsSinceStatus = 0;
@@ -168,39 +142,32 @@ public final class DogBreederClient implements ClientModInitializer {
     }
 
     private static WolfEntity chooseTarget(ClientPlayerEntity player, List<WolfEntity> wolves) {
-        List<WolfEntity> readyAdults = new ArrayList<>();
-        List<WolfEntity> lovingAdults = new ArrayList<>();
         List<WolfEntity> babies = new ArrayList<>();
+        List<WolfEntity> adults = new ArrayList<>();
 
         for (WolfEntity wolf : wolves) {
-            if (wolfCooldowns.getOrDefault(wolf.getId(), 0) > 0) continue;
-
-            if (wolf.isBaby()) {
-                babies.add(wolf);
-            } else if (wolf.isInLove()) {
-                lovingAdults.add(wolf);
-            } else if (wolf.getBreedingAge() == 0) {
-                readyAdults.add(wolf);
-            }
+            if (wolf.isBaby()) babies.add(wolf);
+            else adults.add(wolf);
         }
 
-        readyAdults.sort(Comparator.comparingDouble(wolf -> player.squaredDistanceTo(wolf)));
-        babies.sort(Comparator
-                .comparingInt(WolfEntity::getBreedingAge)
-                .thenComparingDouble(wolf -> player.squaredDistanceTo(wolf)));
-
-        // Get two adults into love mode as quickly as possible.
-        if (readyAdults.size() >= 2 || (!lovingAdults.isEmpty() && !readyAdults.isEmpty())) {
-            return readyAdults.get(0);
-        }
-
-        // Once the adults are handled, spam-feed babies so they grow as fast as the server accepts food.
+        // If any babies exist, spam-feed them first to force growth as fast as the server accepts it.
         if (!babies.isEmpty()) {
-            return babies.get(0);
+            babies.sort(Comparator
+                    .comparingInt(WolfEntity::getBreedingAge)
+                    .thenComparingDouble(wolf -> player.squaredDistanceTo(wolf)));
+            WolfEntity target = babies.get(Math.floorMod(babyCursor, babies.size()));
+            babyCursor++;
+            adultCursor = 0;
+            return target;
         }
 
-        if (!readyAdults.isEmpty()) {
-            return readyAdults.get(0);
+        // No babies: spam EVERY adult in round-robin order, regardless of love state or breeding cooldown.
+        if (!adults.isEmpty()) {
+            adults.sort(Comparator.comparingDouble(wolf -> player.squaredDistanceTo(wolf)));
+            WolfEntity target = adults.get(Math.floorMod(adultCursor, adults.size()));
+            adultCursor++;
+            babyCursor = 0;
+            return target;
         }
 
         return null;
@@ -250,10 +217,5 @@ public final class DogBreederClient implements ClientModInitializer {
             if (stack.isOf(Items.COOKED_BEEF)) total += stack.getCount();
         }
         return total;
-    }
-
-    private static void tickWolfCooldowns() {
-        wolfCooldowns.replaceAll((id, ticks) -> ticks - 1);
-        wolfCooldowns.entrySet().removeIf(entry -> entry.getValue() <= 0);
     }
 }
